@@ -52,13 +52,15 @@ const int HEADER_PAGE_END_BIT = sizeof(HEADER_DATA) * CHAR_BIT - 2;
 void init();
 
 /*
- * allocate a new page, return a pointer to the beginning of the page as a block header.
- * the block header in question initially represents the whole page as a free region
- * a header is also placed at the end of the page, with page-end-bit set to 1, and a size of 0
+ * Allocate n pages-worth of heap space, return a pointer to the beginning of the
+ * page as a block header. The block header in question initially represents the
+ * whole page as a free region.
+ * A header is also placed at the end of the page, with page-end-bit set to 1, and a size of 0
  * this header will always be "in-use" internally; eventually the header's next pointer
  * will point to the base of the next page(s) that get allocated.
+ * If n is 0, NULL is returned.
  */
-block_header *allocatePage();
+block_header *allocatePage(unsigned int n);
 
 //allocate new heap space with an added header, size is clamped between
 //ALLOCATION_MINIMUM and ALLOCATION_MAXIMUM inclusive
@@ -121,19 +123,23 @@ void myfree(void *ptr) {
 /*--- OTHER FUNCTIONS ---*/
 
 void init() {
-    ROOT = allocatePage();
+    ROOT = allocatePage(1);
     END = ROOT->next;
 }
 
 /*
- * allocate a new page, return a pointer to the beginning of the page as a block header.
- * the block header in question initially represents the whole page as a free region
- * a header is also placed at the end of the page, with page-end-bit set to 1, and a size of 0
+ * Allocate n pages-worth of heap space, return a pointer to the beginning of the
+ * page as a block header. The block header in question initially represents the
+ * whole page as a free region.
+ * A header is also placed at the end of the page, with page-end-bit set to 1, and a size of 0
  * this header will always be "in-use" internally; eventually the header's next pointer
  * will point to the base of the next page(s) that get allocated.
+ * If n is 0, NULL is returned.
  */
-block_header *allocatePage() {
-    size_t size = getpagesize();
+block_header *allocatePage(unsigned int n) {
+    if (n == 0)
+        return NULL;
+    size_t size = n * getpagesize();
     void *alloc = mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (alloc == MAP_FAILED)
         perror("MMAP error:");
@@ -143,7 +149,7 @@ block_header *allocatePage() {
     pageRoot->next = pageFooter;
     pageRoot->data = 0;
     header_setfree(pageRoot, true);
-    header_setsize(pageRoot, getpagesize() - 2 * sizeof(block_header));
+    header_setsize(pageRoot, size - 2 * sizeof(block_header));
     return pageRoot;
 }
 
@@ -184,7 +190,7 @@ block_header *first_fit(int size) {
 //append a new region after the last region (hence, in a new page)
 block_header *append_region(int size) {
     block_header *oldEnd = END;
-    block_header *page = allocatePage();
+    block_header *page = allocatePage((size / getpagesize()) + 1);
     //point end to the cap of the new page
     END = page->next;
     //the cap of the old page contains a pointer to the header of the new page
@@ -216,6 +222,8 @@ block_header *divide(block_header *header, int size) {
 //coalesce all regions left-wards until we get to a non-free region
 void coalesce_left(block_header *header) {
 }
+
+/*--- BIT-TWIDDLING ---*/
 
 //return the corresponding region size from the header's data segment
 int header_getsize(block_header *header) {
