@@ -8,6 +8,18 @@
 #include "myalloc.h"
 
 /*--- MACROS ---*/
+/*
+ * Memory Layout Example (arbitrary N and M):
+ *
+ * |--------------N * PAGESIZE---------------|
+ * |HEADER|---REGION---|HEADER|--REG--|HEADER|
+ *                                           |   page end of one allocation has
+ * /-----------------------------------------/   pointer to next page (if any)
+ * |
+ * V
+ * |--------------M * PAGESIZE---------------|
+ * |HEADER|---------------------------|HEADER|
+ */
 #define HEADER_DATA unsigned long
 #define HEADER_FROM_REGION(region_p) ((block_header*)((void*)region_p - sizeof(block_header)))
 #define REGION_FROM_HEADER(header_p) ((void*)((void*)header_p + sizeof(block_header)))
@@ -110,11 +122,12 @@ static block_header *END = NULL;
 void *myalloc(int size) {
     if (ROOT == NULL)
         init();
-    return REGION_FROM_HEADER(allocate(size));
+    block_header *header = first_fit(size);
+    return REGION_FROM_HEADER(header);
 }
 
 void myfree(void *ptr) {
-    //mark the region as "not being used"
+    //mark the region as "not being used", but leave deallocation up to the coalescing function
     block_header *header = HEADER_FROM_REGION(ptr);
     header_setfree(header, true);
     //todo coalesce
@@ -153,14 +166,6 @@ block_header *allocatePage(unsigned int n) {
     return pageRoot;
 }
 
-//allocate new heap space with an added header, size is clamped between
-//ALLOCATION_MINIMUM and ALLOCATION_MAXIMUM inclusive
-block_header *allocate(int size) {
-    //find space for the new region
-    block_header *header = first_fit(size);
-    return header;
-}
-
 //return pointer to heap space in the first free region that can support a new
 //block allocation of the specified size
 block_header *first_fit(int size) {
@@ -176,7 +181,9 @@ block_header *first_fit(int size) {
                 //the region in question is big enough to be split into two
                 return divide(header, size);
             } else {
-                //the region is not big enough to be split, return the region with no alterations to size
+                //the region is not big enough to be split, but is still big
+                //enough to hold the requested size
+                //return the header, with no alterations to size
                 header_setfree(header, false);
                 return header;
             }
@@ -217,10 +224,6 @@ block_header *divide(block_header *header, int size) {
         middle->next = next;
         return header;
     }
-}
-
-//coalesce all regions left-wards until we get to a non-free region
-void coalesce_left(block_header *header) {
 }
 
 /*--- BIT-TWIDDLING ---*/
