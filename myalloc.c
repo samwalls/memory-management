@@ -19,6 +19,8 @@
  * V
  * |--------------M * PAGESIZE---------------|
  * |HEADER|---------------------------|HEADER|
+ *
+ * Use header_print(h); to print out a diagram of your memory, in a similar fashion to this
  */
 #define HEADER_DATA unsigned long
 #define HEADER_FROM_REGION(region_p) ((block_header*)((void*)region_p - sizeof(block_header)))
@@ -76,20 +78,32 @@ block_header *allocatePage(unsigned int n);
 
 //allocate new heap space with an added header, size is clamped between
 //ALLOCATION_MINIMUM and ALLOCATION_MAXIMUM inclusive
-block_header *allocate(int size);
+block_header *allocate(unsigned int size);
 
 //return pointer to heap space in the first free region that can support a new
 //block allocation of the specified size
-block_header *first_fit(int size);
+block_header *first_fit(unsigned int size);
 
 //append a new region to the end of the memory, creates a new page if needed
-block_header *append_region(int size);
+block_header *append_region(unsigned int size);
 
 //divide a region into two, based on size, updating the necessary header pointers
-block_header *divide(block_header *header, int size);
+block_header *divide(block_header *header, unsigned int size);
 
-//coalesce all regions left-wards
-void coalesce_left(block_header *header);
+//coalesce this region and the region to its right
+//return NULL if header is NULL, non-free or is a page-end
+//if the region on the right is NULL, non-free or is a page end then nothing will change
+//return the header of the combined region
+block_header *coalesce(block_header *header);
+
+//perform coalesce on all applicable regions, right-ward
+block_header *coalesce_right(block_header *header);
+
+//deallocate regions that should be removed as fit; pass header as a hint.
+void clean(block_header *header);
+
+//print a visual representation of the memory starting from header, moving right
+void header_print(block_header *header);
 
 //return the corresponding region size from the header's data segment
 int header_getsize(block_header *header);
@@ -131,6 +145,8 @@ void myfree(void *ptr) {
     block_header *header = HEADER_FROM_REGION(ptr);
     header_setfree(header, true);
     //todo coalesce
+    coalesce_right(header);
+    clean(header);
 }
 
 /*--- OTHER FUNCTIONS ---*/
@@ -153,6 +169,7 @@ block_header *allocatePage(unsigned int n) {
     if (n == 0)
         return NULL;
     size_t size = n * getpagesize();
+    printf("allocating new page of memory, size %lu\n", size);
     void *alloc = mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (alloc == MAP_FAILED)
         perror("MMAP error:");
@@ -162,13 +179,13 @@ block_header *allocatePage(unsigned int n) {
     pageRoot->next = pageFooter;
     pageRoot->data = 0;
     header_setfree(pageRoot, true);
-    header_setsize(pageRoot, size - 2 * sizeof(block_header));
+    header_setsize(pageRoot, size - sizeof(block_header));
     return pageRoot;
 }
 
-//return pointer to heap space in the first free region that can support a new
-//block allocation of the specified size
-block_header *first_fit(int size) {
+//return pointer to heap space in the first free region that can support a block
+//allocation of the specified size
+block_header *first_fit(unsigned int size) {
     if (size < ALLOCATION_MINIMUM)
         size = ALLOCATION_MINIMUM;
     block_header *header = ROOT;
@@ -190,12 +207,12 @@ block_header *first_fit(int size) {
         }
         header = header->next;
     }
-    //if we reach here, no fit could be found
+    //if we reach here, no fit could be found, allocate new space
     return append_region(size);
 }
 
 //append a new region after the last region (hence, in a new page)
-block_header *append_region(int size) {
+block_header *append_region(unsigned int size) {
     block_header *oldEnd = END;
     block_header *page = allocatePage((size / getpagesize()) + 1);
     //point end to the cap of the new page
@@ -208,21 +225,97 @@ block_header *append_region(int size) {
 
 //divide a region into two, based on size, updating the necessary header pointers
 //return a the passed header, or NULL if the region could not be divided
-block_header *divide(block_header *header, int size) {
+block_header *divide(block_header *header, unsigned int size) {
     //if the passed header was null, was not free (therefore including page-ends),
     //or doesn't have sufficient size; return null
     if (header == NULL || !header_isfree(header) || header_getsize(header) < size - sizeof(block_header))
         return NULL;
-    else {
-        block_header *middle = REGION_FROM_HEADER(header) + size;
-        block_header *next = header->next;
-        header_setsize(header, ((void*)middle) - ((void*)REGION_FROM_HEADER(header)));
-        header_setsize(middle, ((void*)next) - ((void*)REGION_FROM_HEADER(middle)));
-        header_setfree(header, false);
-        header_setfree(middle, true);
-        header->next = middle;
-        middle->next = next;
+    block_header *middle = REGION_FROM_HEADER(header) + size;
+    block_header *next = header->next;
+    header_setsize(header, ((void*)middle) - ((void*)REGION_FROM_HEADER(header)));
+    header_setsize(middle, ((void*)next) - ((void*)REGION_FROM_HEADER(middle)));
+    header_setfree(header, false);
+    header_setfree(middle, true);
+    header->next = middle;
+    middle->next = next;
+    return header;
+}
+
+//coalesce this region and the region to its right
+//return NULL if header is NULL, non-free or is a page-end
+//if the region on the right is NULL, non-free or is a page end then nothing will change
+//return the header of the combined region
+block_header *coalesce(block_header *header) {
+    if (header == NULL || !header_isfree(header) || header_isend(header))
+        return NULL;
+    else if (header->next == NULL || !header_isfree(header->next) || header_isend(header->next))
         return header;
+    //safe to combine
+    printf("coalescing regions %p and %p\n", (void*)header, (void*)header->next);
+    block_header *right = header->next;
+    header_setsize(header, header_getsize(header) + sizeof(block_header) + header_getsize(right));
+    header->next = right->next;
+    return header;
+}
+
+//perform coalesce on all applicable regions, right-ward
+block_header *coalesce_right(block_header *header) {
+    if (header == NULL)
+        return NULL;
+    while (header->next != NULL) {
+        bool joined = false;
+        if (header_isfree(header) && header_isfree(header->next)) {
+            coalesce(header);
+        }
+        header = joined ? header : header->next;
+    }
+    return header;
+}
+
+//deallocate regions that should be removed as fit; pass header as a hint.
+void clean(block_header *header) {
+    if (header == NULL)
+        return;
+    while (header != NULL && header->next != NULL) {
+        //check for page-end headers
+        if (header_isend(header)) {
+            //if the next page is empty (and it is the last page) then deallocate it
+            block_header *page = header->next;
+            block_header *nextPage = page->next->next == NULL ? NULL : page->next->next;
+            if (page != NULL && (page->next == NULL || header_isend(page->next))) {
+                printf("found empty page %p through %p; deallocating\n", (void*)page, (void*)page->next + sizeof(block_header));
+                munmap(page, header_getsize(page) + 2 * sizeof(block_header));
+                //if next is null then page is the last page in the list
+                header->next = nextPage;
+            }
+        }
+        header = header->next;
+    }
+}
+
+//print a visual representation of the memory starting from header, moving right
+void header_print(block_header *header) {
+    if (header != NULL) {
+        while (header->next != NULL) {
+            if (header == ROOT)
+                printf("|ROOT|");
+            else if (header_isend(header) && header->next != NULL)
+                printf("|END|  >  ");
+            else if (header->next == NULL)
+                printf("|END|");
+            else
+                printf("|HEAD|");
+
+            int size = header_getsize(header);
+            if (size > 0) {
+                if (header_isfree(header))
+                    printf("___%i___", size);
+                else
+                    printf("***%i***", size);
+            }
+            header = header->next;
+        }
+        printf("|END|\n");
     }
 }
 
