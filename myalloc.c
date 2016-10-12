@@ -42,6 +42,7 @@
 typedef struct block_header {
     HEADER_DATA data;
     struct block_header *next;
+    struct block_header *prev;
 } block_header;
 
 /*
@@ -154,6 +155,7 @@ void myfree(void *ptr) {
 void init() {
     ROOT = allocatePage(1);
     END = ROOT->next;
+    END->next = NULL;
 }
 
 /*
@@ -169,10 +171,10 @@ block_header *allocatePage(unsigned int n) {
     if (n == 0)
         return NULL;
     size_t size = n * getpagesize();
-    printf("allocating new page of memory, size %lu\n", size);
+    //printf("allocating new page of memory, size %lu\n", size);
     void *alloc = mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (alloc == MAP_FAILED)
-        perror("MMAP error:");
+        perror("myalloc MMAP error:");
     block_header *pageRoot = (block_header*) alloc;
     block_header *pageFooter = (void *)pageRoot + (size - sizeof(block_header));
     header_setend(pageFooter, true);
@@ -180,6 +182,8 @@ block_header *allocatePage(unsigned int n) {
     pageRoot->data = 0;
     header_setfree(pageRoot, true);
     header_setsize(pageRoot, size - sizeof(block_header));
+    pageRoot->prev = NULL;
+    pageFooter->prev = pageRoot;
     return pageRoot;
 }
 
@@ -215,8 +219,10 @@ block_header *first_fit(unsigned int size) {
 block_header *append_region(unsigned int size) {
     block_header *oldEnd = END;
     block_header *page = allocatePage((size / getpagesize()) + 1);
+    page->prev = oldEnd;
     //point end to the cap of the new page
     END = page->next;
+    END->prev = page;
     //the cap of the old page contains a pointer to the header of the new page
     oldEnd->next = page;
     assert(divide(page, size) != NULL);
@@ -238,6 +244,8 @@ block_header *divide(block_header *header, unsigned int size) {
     header_setfree(middle, true);
     header->next = middle;
     middle->next = next;
+    middle->prev = header;
+    next->prev = middle;
     return header;
 }
 
@@ -251,7 +259,7 @@ block_header *coalesce(block_header *header) {
     else if (header->next == NULL || !header_isfree(header->next) || header_isend(header->next))
         return header;
     //safe to combine
-    printf("coalescing regions %p and %p\n", (void*)header, (void*)header->next);
+    //printf("coalescing regions %p and %p\n", (void*)header, (void*)header->next);
     block_header *right = header->next;
     header_setsize(header, header_getsize(header) + sizeof(block_header) + header_getsize(right));
     header->next = right->next;
@@ -277,19 +285,38 @@ void clean(block_header *header) {
     if (header == NULL)
         return;
     while (header != NULL && header->next != NULL) {
-        //check for page-end headers
-        if (header_isend(header)) {
+        //if we can deallocate this region as a multiple of page sizes...
+        if (header_isend(header->next) && (header_getsize(header) + 2 * sizeof(block_header)) % getpagesize() == 0) {
+            //remove the page from the linked list
+            block_header *nextPage = header->next == NULL ? NULL : header->next->next;
+            if (nextPage != NULL)
+                nextPage->prev = header->prev;
+            if (header->prev != NULL) {
+                header->prev->next = nextPage;
+            } else {
+                //this must be the root if the previous pointer is null
+                assert(header == ROOT);
+                //reassign the ROOT
+                ROOT = nextPage;
+            }
+            //deallocate its space
+            //printf("found empty page %p through %p; deallocating\n", (void*)header, (void*)header->next + sizeof(block_header));
+            munmap(header, header_getsize(header) + 2 * sizeof(block_header));
+            header = nextPage;
+        //... or check for page-end headers
+        } else if (header_isend(header)) {
             //if the next page is empty (and it is the last page) then deallocate it
             block_header *page = header->next;
             block_header *nextPage = page->next->next == NULL ? NULL : page->next->next;
             if (page != NULL && (page->next == NULL || header_isend(page->next))) {
-                printf("found empty page %p through %p; deallocating\n", (void*)page, (void*)page->next + sizeof(block_header));
+                //printf("found empty page %p through %p; deallocating\n", (void*)page, (void*)page->next + sizeof(block_header));
                 munmap(page, header_getsize(page) + 2 * sizeof(block_header));
                 //if next is null then page is the last page in the list
                 header->next = nextPage;
+                nextPage->prev = header;
             }
         }
-        header = header->next;
+        header = header != NULL ? header->next : NULL;
     }
 }
 
